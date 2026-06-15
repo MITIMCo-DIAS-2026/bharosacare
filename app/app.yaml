@@ -1,0 +1,11 @@
+# Databricks Apps entry config.
+# Verify the exact command/port against your template's app.yaml or current
+# Databricks docs before deploy - some setups inject the port via env var.
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port
+  - "8501"
+  - --server.address
+  - "0.0.0.0"

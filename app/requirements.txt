@@ -1,0 +1,6 @@
+# core.py uses only the standard library (math) - nothing to add for it.
+# Owner B's real db.py will add its Postgres driver here (e.g. psycopg[binary]).
+# Owner C's real explainer.py will add its Databricks SDK / serving client here.
+streamlit
+psycopg[binary,pool]
+databricks-sdk>=0.81.0
