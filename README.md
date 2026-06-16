@@ -140,9 +140,6 @@ The app runs as a Databricks App on Free Edition, reading from Lakebase synced t
 
 This project is a navigation aid, not medical advice.
 
-## Team
-
-_TODO — list the four team members._
 
 ## License
 
