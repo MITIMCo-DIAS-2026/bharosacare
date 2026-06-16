@@ -97,6 +97,40 @@ def test_10_no_source_is_unverified():
     assert r["band"] == "unverified"
 
 
+# --- trust_score v2: graded credit, location, corroboration ---------------
+
+def test_11_more_sources_scores_higher():
+    one = trust_score(_full_facility(source_urls="https://a.gov.in"))
+    three = trust_score(_full_facility(
+        source_urls="https://a.gov.in;https://b.org;https://c.com"))
+    assert three["score"] > one["score"]
+
+
+def test_12_location_confidence_affects_score():
+    strong = trust_score(_full_facility(geo_status="consistent", coord_source="facility"))
+    weak = trust_score(_full_facility(geo_status="unknown", coord_source="pincode_fallback"))
+    assert strong["score"] > weak["score"]
+
+
+def test_13_specialty_corroboration_adds_points():
+    backed = trust_score(_full_facility(capability="cardiac care", procedure="angioplasty"))
+    unbacked = trust_score(_full_facility(capability="general help", procedure="basic visit",
+                                          specialties="cardiology"))
+    assert backed["score"] > unbacked["score"]   # same field lengths; only corroboration differs
+
+
+def test_14_doctor_count_magnitude_is_not_a_signal():
+    few = trust_score(_full_facility(number_doctors="5"))
+    many = trust_score(_full_facility(number_doctors="500"))
+    assert few["score"] == many["score"]   # presence only - size is never trust
+
+
+def test_15_components_sum_to_score():
+    r = trust_score(_full_facility())      # no PMJAY bonus in the base fixture
+    assert round(sum(c["got"] for c in r["components"])) == r["score"]
+    assert sum(c["max"] for c in r["components"]) == 100
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

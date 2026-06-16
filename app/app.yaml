@@ -1,11 +1,24 @@
 # Databricks Apps entry config.
-# Verify the exact command/port against your template's app.yaml or current
-# Databricks docs before deploy - some setups inject the port via env var.
 command:
   - streamlit
   - run
   - app.py
-  - --server.port
-  - "8501"
-  - --server.address
-  - "0.0.0.0"
+
+env:
+  # Lakebase endpoint (db.py mints its OAuth token against this).
+  - name: ENDPOINT_NAME
+    value:  "projects/dias-postgres-db/branches/production/endpoints/primary" 
+    #"projects/dias-postgres-db/branches/production/endpoints/primary"
+
+  # Genie space for the "Ask about these facilities" box (analytical Q&A over
+  # the curated tables). This is where Genie actually works on Free Edition.
+  # Attach this same space as an app resource (Configure > Add resource > Genie
+  # Space) so the service principal has CAN RUN.
+  - name: GENIE_SPACE_ID
+    value: "01f168f682d71c8eac87df19687e3ebb"
+
+  # Foundation Model APIs are disabled on this Free Edition workspace
+  # (Databricks-set rate limit of 0), so the per-card explainer runs
+  # templates-only. Leave this at 0.
+  - name: MAX_LLM_CALLS
+    value: "0"

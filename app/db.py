@@ -7,7 +7,7 @@ Lakebase Postgres access layer. Four functions the app calls (Contract 3):
     save_facility(session_id, facility_id)      -> None
     list_saved(session_id)                      -> list[dict]
 
-SCHEMA: "bharosacare" (set via SCHEMA below). This must match BOTH the schema
+SCHEMA: "app" (team-agreed). Must match the schema Niraj syncs facilities/pincodes
 Workstream A syncs the curated tables into AND the schema in schema.sql. A
 synced table's Postgres schema inherits the Unity Catalog schema name, so the
 curated tables in UC schema `bharosacare` arrive as bharosacare.facilities /
@@ -42,8 +42,7 @@ from databricks.sdk import WorkspaceClient
 
 # Postgres schema holding the synced tables AND the operational table.
 # Override with env var if the team renames it; defaults to the agreed name.
-
-SCHEMA = os.environ.get("BHAROSA_SCHEMA", "app")   # was "bharosacare"
+SCHEMA = os.environ.get("BHAROSA_SCHEMA", "app")
 
 # One SDK client per process; it generates fresh DB credentials on demand.
 _w = WorkspaceClient()
@@ -152,8 +151,11 @@ def save_facility(session_id: str, facility_id: str) -> None:
 def list_saved(session_id: str) -> list[dict]:
     """Return the session's saved facilities, joined to facility detail so the
     UI can render the shortlist directly. Newest first."""
+    # Qualify every facility column with f. — facility_id also exists in
+    # saved_facilities, so an unqualified column list is ambiguous in this join.
+    facility_cols = ", ".join(f"f.{c.strip()}" for c in _FACILITY_COLS.split(","))
     sql = f"""
-        SELECT s.saved_at, {_FACILITY_COLS}
+        SELECT s.saved_at, {facility_cols}
         FROM {SCHEMA}.saved_facilities s
         JOIN {SCHEMA}.facilities f ON f.facility_id = s.facility_id
         WHERE s.session_id = %s

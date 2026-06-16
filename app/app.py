@@ -1,39 +1,50 @@
 """app.py - BharosaCare (Workstream D, Milestone 5).
 
-Single mobile-first page: pincode + specialty -> ranked, trust-badged, cited
-results. The ranking and the trust verdict come from core.py (deterministic,
-golden-tested). This page only DISPLAYS what core returns - it never computes
-distance or trust itself. The model (explainer) only narrates.
+Two tabs:
+  - Find care: pincode + specialty -> ranked, trust-badged results (deterministic
+    ranking + trust from core.py), per-card narration (explainer.py), and a Genie
+    analytical Q&A box (genie_box.py).
+  - My shortlist: facilities the user saved (written to Lakebase via db.py), shown
+    on a map.
 
-Wired to the db/explainer STUBS today; when Owner B's db.py and Owner C's
-explainer.py land, they replace those files and nothing here changes.
+This page only DISPLAYS what core returns - it never computes distance or trust.
 """
 
+import html
 from uuid import uuid4
 
+import pandas as pd
 import streamlit as st
 
 import core
 import db
 import explainer
+import genie_box
 
-# Controlled specialty list (the only thing the user picks, besides pincode).
 SPECIALTIES = [
     "Cardiology", "Oncology", "Orthopedics", "Pediatrics",
     "General", "Neurology", "Gynecology",
 ]
 RADIUS_KM = 50
 
-# band -> (label, icon, text colour, background) : word + icon + colour, never colour alone
 BADGES = {
     "verified":   ("Verified",   "\u2713", "#1a7f37", "#e6f4ea"),
     "partial":    ("Partial",    "\u25d0", "#9a6700", "#fff8c5"),
     "unverified": ("Unverified", "\u25cb", "#57606a", "#eaeef2"),
 }
 
+BADGE_HELP = {
+    "verified": ("We corroborated this facility's location and that its record lists this "
+                 "specialty. Verified means we found supporting evidence \u2014 it is not a "
+                 "quality or endorsement rating."),
+    "partial": ("Some details checked out, but key fields could not be corroborated from the "
+                "source. Worth a closer look before relying on it."),
+    "unverified": ("We could not corroborate these details against the facility's source. This "
+                   "means missing evidence \u2014 not that the facility is poor quality."),
+}
+
 st.set_page_config(page_title="BharosaCare", page_icon="\U0001fa7a", layout="centered")
 
-# session id stands in for the uuid cookie (Streamlit has no cookie primitive)
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid4())
 session_id = st.session_state.session_id
@@ -41,11 +52,56 @@ session_id = st.session_state.session_id
 
 def badge_html(band: str) -> str:
     label, icon, fg, bg = BADGES.get(band, BADGES["unverified"])
+    help_text = html.escape(BADGE_HELP.get(band, BADGE_HELP["unverified"]), quote=True)
     return (
-        f"<span style='display:inline-block;padding:3px 12px;border-radius:999px;"
-        f"background:{bg};color:{fg};font-weight:600;font-size:0.85rem;'>"
-        f"{icon}&nbsp;{label}</span>"
+        f"<span title='{help_text}' style='display:inline-block;padding:3px 12px;"
+        f"border-radius:999px;background:{bg};color:{fg};font-weight:600;"
+        f"font-size:0.85rem;cursor:help;'>{icon}&nbsp;{label}</span>"
     )
+
+
+def rating_explanation(verdict: dict, f: dict) -> str:
+    """Plain-language reason for the band - honest about WHY, including the
+    location cross-check that gates 'Verified' independently of the score."""
+    band = verdict["band"]
+    score = verdict["score"]
+    geo = f.get("geo_status") or "unknown"
+    has_source = core._is_populated(f.get("source_urls"))
+    geo_ok = geo in ("consistent", "repaired")
+
+    if band == "verified":
+        return ("We rate this **Verified**: it has a published source and its location checks out "
+                "against its pincode. The basics are corroborated \u2014 this is not a quality score.")
+    if band == "unverified":
+        if not has_source:
+            return ("We rate this **Unverified**: we couldn't find a published source to back up "
+                    "its listing. That's a gap in the record \u2014 not a judgement on the facility.")
+        return ("We rate this **Unverified**: too little of its record could be corroborated. "
+                "That's about missing information, not the facility's quality.")
+    # Partial: name the real gate, especially a complete record held back by geo.
+    if score >= 70 and not geo_ok:
+        if geo == "mismatch":
+            return ("We rate this **Partial**: the record itself is complete, but its stated "
+                    "location **conflicts** with its pincode, so we can't confirm where it "
+                    "actually is. A strong record alone doesn't earn Verified without a location "
+                    "we can corroborate.")
+        return ("We rate this **Partial**: the record is complete, but we **couldn't cross-check "
+                "its location** against its pincode. Verified needs both a strong record and a "
+                "confirmed location \u2014 so even a perfect evidence score caps at Partial here.")
+    return ("We rate this **Partial**: there's some supporting evidence, but not enough to fully "
+            "corroborate it. Use it as a starting point and confirm the details before relying on it.")
+
+
+def best_source(f: dict) -> str | None:
+    urls = [u.strip() for u in str(f.get("source_urls") or "").split(";") if u.strip()]
+    return urls[0] if urls else None
+
+
+def directions_url(f: dict) -> str | None:
+    lat, lon = f.get("latitude"), f.get("longitude")
+    if lat is None or lon is None:
+        return None
+    return f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}"
 
 
 def render_card(f: dict, specialty: str) -> None:
@@ -54,69 +110,159 @@ def render_card(f: dict, specialty: str) -> None:
 
     with st.container(border=True):
         st.markdown(badge_html(verdict["band"]), unsafe_allow_html=True)
-        st.markdown(f"#### {f.get('name', 'Unnamed facility')}")
+        st.markdown(
+            f"<h4 style='margin:0.3rem 0 0.1rem 0;'>"
+            f"{html.escape(f.get('name', 'Unnamed facility'))}</h4>",
+            unsafe_allow_html=True,
+        )
         st.write(f"\U0001f4cd {f['distance_km']:.1f} km away \u00b7 {f.get('city', '')}")
 
+        facts = []
+        if core._is_populated(f.get("number_doctors")):
+            facts.append(f"Doctors listed: {f['number_doctors']}")
+        if core._is_populated(f.get("capacity")):
+            facts.append(f"Beds: {f['capacity']}")
+        if facts:
+            st.caption(" \u00b7 ".join(facts)
+                       + " \u2014 self-reported, shown for context (not part of the trust score)")
+
         st.write(why["text"])
-        if not why["grounded"]:
-            st.caption("Auto-summary \u2014 model unavailable")
-        for url in why.get("citations", []):
-            st.markdown(f"[Open source]({url})")
 
-        if verdict["band"] == "partial":
-            st.caption("\u26a0\ufe0f Needs a closer look")
-        if verdict["unverified_fields"]:
-            missing = ", ".join(x.replace("_", " ") for x in verdict["unverified_fields"])
-            st.caption(f"Not stated \u2014 see source: {missing}")
+        st.caption(f"Evidence score: {verdict['score']}/100")
+        with st.expander("Why this rating?"):
+            st.markdown(rating_explanation(verdict, f))
+            st.markdown("**Where the score comes from**")
+            for comp in verdict["components"]:
+                got, mx = comp["got"], comp["max"]
+                mark = "\u2713" if got >= mx - 0.05 else ("\u25d0" if got > 0 else "\u2014")
+                st.markdown(f"- {mark} {comp['label']} \u2014 {got:g} of {mx}")
+            if f.get("pmjay_match") == "matched":
+                st.markdown("- \u2713 PMJAY empanelment \u2014 +5 bonus")
+            link = best_source(f)
+            if link:
+                st.markdown(f"[View source \u2197]({link})")
+            else:
+                st.caption("No published source on record.")
 
-        if st.button("Save to shortlist", key=f"save_{f['facility_id']}"):
-            db.save_facility(session_id, f["facility_id"])
-            st.toast("Saved to your shortlist")
+        col_save, col_dir = st.columns(2)
+        with col_save:
+            if st.button("Save to shortlist", key=f"save_{f['facility_id']}"):
+                db.save_facility(session_id, f["facility_id"])
+                st.toast("Saved to your shortlist")
+        with col_dir:
+            gmaps = directions_url(f)
+            if gmaps:
+                st.markdown(f"[\U0001f9ed Get directions \u2197]({gmaps})")
+
+        # On-demand Genie, one call only when the user taps it (no auto-firing,
+        # so it never trips the ~5/min rate limit). Answer persists per card.
+        genie_key = f"genie_card_{f['facility_id']}"
+        if st.button("\U0001f4ac Ask Genie about this place", key=f"ask_{f['facility_id']}"):
+            q = (f"In 2-3 plain sentences, summarise what the record shows about the facility "
+                 f"named \"{f.get('name', '')}\" in {f.get('city', '')} that is relevant to "
+                 f"someone seeking {specialty}. Use only its own record.")
+            ctx = f"Healthcare facilities that offer {specialty.lower()}."
+            with st.spinner("Asking Genie\u2026"):
+                st.session_state[genie_key] = genie_box.ask(q, context=ctx)
+        if genie_key in st.session_state:
+            card_answer = st.session_state[genie_key]
+            if card_answer:
+                st.info(card_answer)
+            else:
+                st.caption("Genie couldn't answer for this one \u2014 the summary above still applies.")
 
 
-# --- header ----------------------------------------------------------------
+# --- header + tabs ---------------------------------------------------------
 st.title("BharosaCare")
 st.caption("Find care you can trust, near any pincode.")
 
-# --- inputs ----------------------------------------------------------------
-pincode = st.text_input("Pincode", placeholder="e.g. 110001", max_chars=6)
-specialty = st.selectbox("Care needed", SPECIALTIES)
+tab_find, tab_saved = st.tabs(["Find care", "My shortlist"])
 
-if st.button("Find care", type="primary"):
-    st.session_state.pop("results", None)
-    if not pincode.strip():
-        st.warning("Enter a 6-digit pincode to search.")
-    else:
-        with st.spinner("Searching nearby facilities\u2026"):
-            origin = db.get_pincode(pincode.strip())
-        if origin is None:
-            st.warning(f"We couldn't find pincode {pincode}. Check the 6 digits and try again.")
+with tab_find:
+    pincode = st.text_input("Pincode", placeholder="e.g. 110001", max_chars=6)
+    specialty = st.selectbox("Care needed", SPECIALTIES)
+
+    if st.button("Find care", type="primary"):
+        st.session_state.pop("results", None)
+        st.session_state.pop("genie_answer", None)
+        if not pincode.strip():
+            st.warning("Enter a 6-digit pincode to search.")
         else:
-            candidates = db.get_facilities_in_bbox(origin["lat"], origin["lon"], RADIUS_KM)
-            ranked = core.rank_facilities(
-                origin["lat"], origin["lon"], specialty, candidates,
-                radius_km=RADIUS_KM, limit=10,
+            with st.spinner("Searching nearby facilities\u2026"):
+                origin = db.get_pincode(pincode.strip())
+            if origin is None:
+                st.warning(f"We couldn't find pincode {pincode}. Check the 6 digits and try again.")
+            else:
+                candidates = db.get_facilities_in_bbox(origin["lat"], origin["lon"], RADIUS_KM)
+                ranked = core.rank_facilities(
+                    origin["lat"], origin["lon"], specialty, candidates,
+                    radius_km=RADIUS_KM, limit=10,
+                )
+                st.session_state.results = {"origin": origin, "specialty": specialty, "ranked": ranked}
+
+    results = st.session_state.get("results")
+    if results:
+        ranked = results["ranked"]
+        if not ranked:
+            st.info("No facilities within 50 km offer that. Try a different specialty or pincode.")
+        else:
+            st.write(
+                f"We found {len(ranked)} place(s) near {results['origin']['district']} "
+                f"that say they offer {results['specialty'].lower()}."
             )
-            st.session_state.results = {"origin": origin, "specialty": specialty, "ranked": ranked}
 
-# --- results (rendered from session_state so saves don't wipe the page) ----
-results = st.session_state.get("results")
-if results:
-    ranked = results["ranked"]
-    if not ranked:
-        st.info("No facilities within 50 km offer that. Try a different specialty or pincode.")
+            # --- Ask about these facilities (Genie) - placed up here so it's
+            #     visible right after a search, not buried under the cards.
+            with st.expander("\U0001f4ac Ask about these facilities", expanded=False):
+                st.caption(
+                    "Natural-language questions about the facility data \u2014 e.g. "
+                    "\u201cwhich has the most doctors?\u201d or \u201cwhich is closest?\u201d"
+                )
+                question = st.text_input(
+                    "Your question", key="genie_q",
+                    placeholder="e.g. which of these has the most doctors?",
+                )
+                if st.button("Ask", key="genie_ask") and question.strip():
+                    ctx = (f"Context: healthcare facilities near {results['origin']['district']} "
+                           f"that offer {results['specialty'].lower()}.")
+                    with st.spinner("Asking\u2026"):
+                        st.session_state["genie_answer"] = genie_box.ask(question.strip(), context=ctx)
+                if "genie_answer" in st.session_state:
+                    answer = st.session_state["genie_answer"]
+                    if answer:
+                        st.info(answer)
+                    else:
+                        st.caption(
+                            "Couldn't answer that one \u2014 try rephrasing it as a data question "
+                            "(counts, distances, or which has the most/least of something)."
+                        )
+
+            st.divider()
+            for f in ranked:
+                render_card(f, results["specialty"])
+
+with tab_saved:
+    saved = db.list_saved(session_id)
+    if not saved:
+        st.info("No saved facilities yet. Save some from the **Find care** tab and they'll appear here on a map.")
     else:
-        st.write(
-            f"We found {len(ranked)} place(s) near {results['origin']['district']} "
-            f"that say they offer {results['specialty'].lower()}."
-        )
-        for f in ranked:
-            render_card(f, results["specialty"])
+        st.write(f"You've saved {len(saved)} facilit{'y' if len(saved) == 1 else 'ies'}.")
 
-# --- shortlist -------------------------------------------------------------
-saved = db.list_saved(session_id)
-if saved:
-    st.divider()
-    st.markdown("### Your shortlist")
-    for s in saved:
-        st.write(f"\u2022 {s.get('name', s['facility_id'])}")
+        coords = [
+            {"latitude": s["latitude"], "longitude": s["longitude"]}
+            for s in saved
+            if s.get("latitude") is not None and s.get("longitude") is not None
+        ]
+        if coords:
+            st.map(pd.DataFrame(coords))
+        else:
+            st.caption("Saved facilities have no coordinates to map.")
+
+        st.markdown("### Saved facilities")
+        for s in saved:
+            name = s.get("name", s["facility_id"])
+            city = s.get("city", "")
+            st.markdown(f"**{name}**" + (f" \u00b7 {city}" if city else ""))
+            d = directions_url(s)
+            if d:
+                st.markdown(f"[\U0001f9ed Get directions \u2197]({d})")
