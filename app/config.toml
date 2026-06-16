@@ -1,0 +1,7 @@
+# Native Streamlit theme. primaryColor flows into the "Find care" button,
+# the active tab indicator, links, and widget accents - so the teal in the
+# banner is echoed consistently without fragile CSS overrides.
+[theme]
+base = "light"
+primaryColor = "#0f766e"
+secondaryBackgroundColor = "#eef4f3"

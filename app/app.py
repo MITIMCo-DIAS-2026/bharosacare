@@ -11,6 +11,7 @@ This page only DISPLAYS what core returns - it never computes distance or trust.
 """
 
 import html
+import re
 from uuid import uuid4
 
 import pandas as pd
@@ -104,6 +105,18 @@ def directions_url(f: dict) -> str | None:
     return f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}"
 
 
+def clean_explanation(text: str) -> str:
+    """Drop a leading conversational question the model sometimes prepends
+    (e.g. 'Would you like ...?'). Our summaries never start with a question,
+    so if the FIRST sentence is one and real content follows, cut it. Anything
+    that opens with a normal statement (ending in '.') is left untouched."""
+    text = (text or "").strip()
+    m = re.match(r"^[^.?!]*\?\s+(.*)", text, re.DOTALL)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return text
+
+
 def render_card(f: dict, specialty: str) -> None:
     verdict = core.trust_score(f)          # deterministic - the page does not decide
     why = explainer.explain(f, specialty)  # narration only
@@ -126,7 +139,10 @@ def render_card(f: dict, specialty: str) -> None:
             st.caption(" \u00b7 ".join(facts)
                        + " \u2014 self-reported, shown for context (not part of the trust score)")
 
-        st.write(why["text"])
+        st.write(clean_explanation(why["text"]))
+        src = best_source(f)
+        if src:
+            st.markdown(f"[View source \u2197]({src})")
 
         st.caption(f"Evidence score: {verdict['score']}/100")
         with st.expander("Why this rating?"):
@@ -138,11 +154,6 @@ def render_card(f: dict, specialty: str) -> None:
                 st.markdown(f"- {mark} {comp['label']} \u2014 {got:g} of {mx}")
             if f.get("pmjay_match") == "matched":
                 st.markdown("- \u2713 PMJAY empanelment \u2014 +5 bonus")
-            link = best_source(f)
-            if link:
-                st.markdown(f"[View source \u2197]({link})")
-            else:
-                st.caption("No published source on record.")
 
         col_save, col_dir = st.columns(2)
         with col_save:
@@ -154,27 +165,40 @@ def render_card(f: dict, specialty: str) -> None:
             if gmaps:
                 st.markdown(f"[\U0001f9ed Get directions \u2197]({gmaps})")
 
-        # On-demand Genie, one call only when the user taps it (no auto-firing,
-        # so it never trips the ~5/min rate limit). Answer persists per card.
-        genie_key = f"genie_card_{f['facility_id']}"
-        if st.button("\U0001f4ac Ask Genie about this place", key=f"ask_{f['facility_id']}"):
-            q = (f"In 2-3 plain sentences, summarise what the record shows about the facility "
-                 f"named \"{f.get('name', '')}\" in {f.get('city', '')} that is relevant to "
-                 f"someone seeking {specialty}. Use only its own record.")
-            ctx = f"Healthcare facilities that offer {specialty.lower()}."
-            with st.spinner("Asking Genie\u2026"):
-                st.session_state[genie_key] = genie_box.ask(q, context=ctx)
-        if genie_key in st.session_state:
-            card_answer = st.session_state[genie_key]
-            if card_answer:
-                st.info(card_answer)
-            else:
-                st.caption("Genie couldn't answer for this one \u2014 the summary above still applies.")
 
-
-# --- header + tabs ---------------------------------------------------------
-st.title("BharosaCare")
-st.caption("Find care you can trust, near any pincode.")
+# --- styling + header ------------------------------------------------------
+st.markdown(
+    """
+    <style>
+      /* Banner - the one signature element, in the brand teal */
+      .bc-banner {
+        background: linear-gradient(135deg, #0f766e 0%, #0b5b54 100%);
+        color: #ffffff; padding: 22px 26px; border-radius: 14px; margin-bottom: 18px;
+        box-shadow: 0 2px 12px rgba(15, 118, 110, 0.20);
+      }
+      .bc-banner h1 { color:#fff; margin:0; font-size:1.95rem; font-weight:800;
+                      letter-spacing:-0.01em; }
+      .bc-banner p  { color:#d7ece9; margin:6px 0 0 0; font-size:1.03rem; }
+      .bc-mark { display:inline-flex; align-items:center; justify-content:center;
+                 width:30px; height:30px; border-radius:50%;
+                 background:rgba(255,255,255,0.18); font-size:1.0rem;
+                 margin-right:10px; vertical-align:middle; }
+      /* Bigger, clearer tabs */
+      .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+      .stTabs [data-baseweb="tab"] { font-size: 1.1rem; font-weight: 600; padding: 12px 22px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown(
+    """
+    <div class="bc-banner">
+      <h1><span class="bc-mark">\u2713</span>BharosaCare</h1>
+      <p>Find care you can trust, near any pincode.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 tab_find, tab_saved = st.tabs(["Find care", "My shortlist"])
 
